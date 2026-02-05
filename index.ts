@@ -1,8 +1,6 @@
 import { parse } from 'node-html-parser';
 import * as fs from 'fs';
 import * as path from 'path';
-import { pipeline } from 'stream/promises';
-import { Readable } from 'stream';
 
 // --- Configuration ---
 const CHANNEL_URL = process.env.CHANNEL_URL || 'https://t.me/s/caronline';
@@ -25,11 +23,11 @@ interface Message {
 async function download(url: string, filepath: string) {
     try {
         const res = await fetch(url);
-        if (!res.ok || !res.body) {
+        if (!res.ok) {
              console.error(`[${new Date().toISOString()}] Failed to fetch ${url}: ${res.status} ${res.statusText}`);
              return;
         }
-        await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(filepath));
+        await Bun.write(filepath, res);
         log(`Downloaded ${path.basename(filepath)}`);
     } catch (e) {
         console.error(`[${new Date().toISOString()}] Error downloading ${url}`, e);
@@ -47,9 +45,10 @@ async function scrape() {
     // Load existing data
     let existingMessages: Message[] = [];
     const dataPath = path.join(CACHE_DIR, 'data.json');
-    if (fs.existsSync(dataPath)) {
+    const dataFile = Bun.file(dataPath);
+    if (await dataFile.exists()) {
         try {
-            existingMessages = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
+            existingMessages = await dataFile.json();
             log(`Loaded ${existingMessages.length} existing messages.`);
         } catch (e) {
             console.error(`[${new Date().toISOString()}] Error reading existing data`, e);
@@ -136,7 +135,7 @@ async function scrape() {
 
     // Save Cache
     log(`Saving ${messages.length} messages to cache...`);
-    fs.writeFileSync(path.join(CACHE_DIR, 'data.json'), JSON.stringify(messages, null, 2));
+    await Bun.write(path.join(CACHE_DIR, 'data.json'), JSON.stringify(messages, null, 2));
     log(`Success! Scraped ${messages.length} messages.`);
 }
 
