@@ -7,30 +7,42 @@ import { Readable } from 'stream';
 // --- Configuration ---
 const CHANNEL_URL = 'https://t.me/s/caronline';
 const CACHE_DIR = path.join(__dirname, 'cache');
-const LIMIT = 20;
+const LIMIT = 10;
+
+function log(message: string) {
+    console.log(`[${new Date().toISOString()}] ${message}`);
+}
 
 interface Message {
     id: string;
     text: string;
     files: string[];
     hash?: string;
+    replyTo: string | null;
 }
 
 // --- Helper: Download File ---
 async function download(url: string, filepath: string) {
     try {
         const res = await fetch(url);
-        if (!res.ok || !res.body) return;
-        // @ts-ignore: Readable.fromWeb requires Node 18+
+        if (!res.ok || !res.body) {
+             console.error(`[${new Date().toISOString()}] Failed to fetch ${url}: ${res.status} ${res.statusText}`);
+             return;
+        }
         await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(filepath));
+        log(`Downloaded ${path.basename(filepath)}`);
     } catch (e) {
-        console.error(`Error downloading ${url}`);
+        console.error(`[${new Date().toISOString()}] Error downloading ${url}`, e);
     }
 }
 
 // --- Main Scraper ---
 async function scrape() {
-    if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR);
+    log('Starting scraper...');
+    if (!fs.existsSync(CACHE_DIR)) {
+        log(`Creating cache directory at ${CACHE_DIR}`);
+        fs.mkdirSync(CACHE_DIR);
+    }
 
     // Load existing data
     let existingMessages: Message[] = [];
@@ -38,14 +50,16 @@ async function scrape() {
     if (fs.existsSync(dataPath)) {
         try {
             existingMessages = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
+            log(`Loaded ${existingMessages.length} existing messages.`);
         } catch (e) {
-            console.error('Error reading existing data', e);
+            console.error(`[${new Date().toISOString()}] Error reading existing data`, e);
         }
     }
     const existingHashes = new Map(existingMessages.filter(m => m.hash).map(m => [m.hash!, m]));
 
-    console.log('Fetching channel...');
+    log(`Fetching channel from ${CHANNEL_URL}...`);
     const res = await fetch(CHANNEL_URL);
+    log(`Channel fetch status: ${res.status}`);
     const html = await res.text();
 
     // 1. Parse HTML (Fast)
@@ -54,6 +68,7 @@ async function scrape() {
     // 2. Select Message Wrappers
     // node-html-parser uses standard querySelectorAll
     const nodes = root.querySelectorAll('.tgme_widget_message_wrap').slice(-LIMIT);
+    log(`Found ${nodes.length} message nodes to process.`);
     const messages: Message[] = [];
 
     for (const node of nodes) {
@@ -61,13 +76,17 @@ async function scrape() {
         const msgNode = node.querySelector('.tgme_widget_message');
         const msgId = msgNode?.getAttribute('data-post')?.split('/')[1] || Date.now().toString();
 
+        // --- Extract Reply ID Only ---
+        const replyHref = node.querySelector('.tgme_widget_message_reply')?.getAttribute('href');
+        const replyTo = replyHref ? replyHref.split('/').pop() || null : null;
+
         // Extract Text (innerHTML to preserve <br>, then clean)
-        const textNode = node.querySelector('.tgme_widget_message_text');
+        const textNode = node.querySelector('.tgme_widget_message_text:not(.js-message_reply_text)');
         let text = '';
         if (textNode) {
             text = textNode.innerHTML
                 .replace(/<br\s*\/?>/gi, '\n') // Turn breaks to newlines
-                .replace(/<[^>]+>/g, '');      // Strip other HTML tags
+                .replace(/<(?!\/?b\b)[^>]+>/gi, '');      // Strip other HTML tags except <b>
         }
 
         const mediaToDownload: string[] = [];
@@ -90,13 +109,15 @@ async function scrape() {
 
         // Generate Content Hash
         // Use Bun's fast non-cryptographic hash (returns number, 64-bit)
-        const contentHash = Bun.hash(JSON.stringify({ text, media: mediaToDownload })).toString();
+        const contentHash = Bun.hash(JSON.stringify({ text, media: mediaToDownload, replyTo })).toString();
 
         if (existingHashes.has(contentHash)) {
-            console.log(`Skipping unchanged message ${msgId}`);
+            log(`Skipping unchanged message ${msgId}`);
             messages.push(existingHashes.get(contentHash)!);
             continue;
         }
+
+        log(`Processing new/changed message ${msgId} with ${mediaToDownload.length} media files (ReplyTo: ${replyTo || 'None'}).`);
 
         // Download loop
         const savedFiles = [];
@@ -105,16 +126,18 @@ async function scrape() {
             const ext = url.split('.').pop()?.split('?')[0] || 'jpg';
             const filename = `${msgId}_${i}.${ext}`;
             
+            log(`Downloading media ${i + 1}/${mediaToDownload.length}: ${url}`);
             await download(url, path.join(CACHE_DIR, filename));
             savedFiles.push(filename);
         }
 
-        messages.push({ id: msgId, text, files: savedFiles, hash: contentHash });
+        messages.push({ id: msgId, text, files: savedFiles, hash: contentHash, replyTo });
     }
 
     // Save Cache
+    log(`Saving ${messages.length} messages to cache...`);
     fs.writeFileSync(path.join(CACHE_DIR, 'data.json'), JSON.stringify(messages, null, 2));
-    console.log(`Success! Scraped ${messages.length} messages.`);
+    log(`Success! Scraped ${messages.length} messages.`);
 }
 
 scrape();
