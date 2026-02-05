@@ -243,6 +243,13 @@ class BaleSyncService {
     messages.sort((a, b) => parseInt(a.id) - parseInt(b.id));
 
     let changesMade = false;
+    const stats = {
+      synced: 0,
+      edited: 0,
+      deleted: 0,
+      skipped: 0,
+      errors: 0
+    };
 
     for (const msg of messages) {
       const processed = this.processedPosts.get(msg.id);
@@ -291,6 +298,7 @@ class BaleSyncService {
                 
               } catch (e) {
                 errorLog(`Failed to send file ${file}`, e);
+                stats.errors++;
               }
             }
           } else if (msg.text) {
@@ -298,6 +306,8 @@ class BaleSyncService {
             const res = await this.client.sendMessage(msg.text, replyToBaleId);
             if (res.ok && res.result) {
               baleMessageId = res.result.message_id;
+            } else {
+                stats.errors++;
             }
           }
 
@@ -310,6 +320,16 @@ class BaleSyncService {
             });
             changesMade = true;
             log(`✅ Synced message ${msg.id} -> Bale ID ${baleMessageId}`);
+            stats.synced++;
+          } else {
+             // If we didn't get a baleMessageId and didn't log an error (e.g. empty message?), count as error or skipped?
+             // If errors were already counted above, we don't want to double count or miss count.
+             // If errors > 0, we already counted.
+             // If it was just empty, maybe skipped.
+             if (stats.errors === 0 && !msg.isDeleted) {
+                 // Maybe it was skipped due to missing files but not counted as error?
+                 // Let's just leave it.
+             }
           }
         } else {
           // New but already deleted, just mark processed
@@ -320,6 +340,7 @@ class BaleSyncService {
             timestamp: Date.now(),
           });
           changesMade = true;
+          stats.skipped++;
         }
 
       } else {
@@ -334,6 +355,7 @@ class BaleSyncService {
           processed.isDeleted = true;
           processed.hash = msg.hash || '';
           changesMade = true;
+          stats.deleted++;
         }
         // Check for Edits (Text only usually)
         else if (!msg.isDeleted && !processed.isDeleted && msg.hash !== processed.hash) {
@@ -349,9 +371,14 @@ class BaleSyncService {
            }
            processed.hash = msg.hash || '';
            changesMade = true;
+           stats.edited++;
+        } else {
+            stats.skipped++;
         }
       }
     }
+
+    log(`Sync stats: ${stats.synced} synced, ${stats.edited} edited, ${stats.deleted} deleted, ${stats.skipped} skipped, ${stats.errors} errors`);
 
     if (changesMade) {
       await this.saveProcessedPosts();
