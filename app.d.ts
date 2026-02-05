@@ -7,5 +7,6 @@ declare global {
         files: string[];
         hash?: string;
         replyTo: string | null;
+        isDeleted: boolean;
     }
 }

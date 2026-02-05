@@ -34,64 +34,69 @@ async function scrape() {
         fs.mkdirSync(CACHE_DIR);
     }
 
-    // Load existing data
-    let existingMessages: Message[] = [];
+    // 1. Load existing data
+    // We use a Map by ID to merge history and detect deletions
+    const historyMap = new Map<string, Message>(); 
     const dataPath = path.join(CACHE_DIR, 'data.json');
     const dataFile = Bun.file(dataPath);
+    
     if (await dataFile.exists()) {
         try {
-            existingMessages = await dataFile.json();
-            log(`Loaded ${existingMessages.length} existing messages.`);
+            const loaded: Message[] = await dataFile.json();
+            loaded.forEach(m => historyMap.set(m.id, m));
+            log(`Loaded ${loaded.length} existing messages.`);
         } catch (e) {
             console.error(`[${new Date().toISOString()}] Error reading existing data`, e);
         }
     }
-    const existingHashes = new Map(existingMessages.filter(m => m.hash).map(m => [m.hash!, m]));
+
+    // Helper to check for content duplicates
+    const existingHashes = new Map(Array.from(historyMap.values()).filter(m => m.hash).map(m => [m.hash!, m]));
 
     log(`Fetching channel from ${CHANNEL_URL}...`);
     const res = await fetch(CHANNEL_URL);
     log(`Channel fetch status: ${res.status}`);
     const html = await res.text();
 
-    // 1. Parse HTML (Fast)
     const root = parse(html);
-
-    // 2. Select Message Wrappers
-    // node-html-parser uses standard querySelectorAll
     const nodes = root.querySelectorAll('.tgme_widget_message_wrap').slice(-LIMIT);
     log(`Found ${nodes.length} message nodes to process.`);
-    const messages: Message[] = [];
+
+    // Track IDs seen in THIS specific run to calculate the "deletion window"
+    const currentRunIds: number[] = [];
 
     for (const node of nodes) {
         // IDs are usually in data-post="channel/123"
         const msgNode = node.querySelector('.tgme_widget_message');
-        const msgId = msgNode?.getAttribute('data-post')?.split('/')[1] || Date.now().toString();
+        const msgIdStr = msgNode?.getAttribute('data-post')?.split('/')[1];
+        const msgId = msgIdStr || Date.now().toString(); // Fallback
+
+        if (msgIdStr) currentRunIds.push(parseInt(msgIdStr));
 
         // --- Extract Reply ID Only ---
         const replyHref = node.querySelector('.tgme_widget_message_reply')?.getAttribute('href');
         const replyTo = replyHref ? replyHref.split('/').pop() || null : null;
 
-        // Extract Text (innerHTML to preserve <br>, then clean)
+        // Extract Text
         const textNode = node.querySelector('.tgme_widget_message_text:not(.js-message_reply_text)');
         let text = '';
         if (textNode) {
             text = textNode.innerHTML
-                .replace(/<br\s*\/?>/gi, '\n') // Turn breaks to newlines
-                .replace(/<(?!\/?b\b)[^>]+>/gi, '');      // Strip other HTML tags except <b>
+                .replace(/<br\s*\/?>/gi, '\n')
+                .replace(/<(?!\/?b\b)[^>]+>/gi, ''); 
         }
 
         const mediaToDownload: string[] = [];
 
-        // A. Photos (Background Images)
+        // A. Photos
         const photos = node.querySelectorAll('.tgme_widget_message_photo_wrap');
         photos.forEach(photo => {
             const style = photo.getAttribute('style') || '';
-            // Extract url('...')
             const match = style.match(/url\(['"]?(.+?)['"]?\)/);
             if (match) mediaToDownload.push(match[1]!);
         });
 
-        // B. Videos & Voice (src attributes)
+        // B. Videos & Voice
         const videos = node.querySelectorAll('video, audio');
         videos.forEach(media => {
             const src = media.getAttribute('src');
@@ -99,12 +104,19 @@ async function scrape() {
         });
 
         // Generate Content Hash
-        // Use Bun's fast non-cryptographic hash (returns number, 64-bit)
         const contentHash = Bun.hash(JSON.stringify({ text, media: mediaToDownload, replyTo })).toString();
 
+        // 2. Logic: Unchanged vs New
         if (existingHashes.has(contentHash)) {
+            // Message content exists. Retrieve it to keep the original file paths.
+            const existingMsg = existingHashes.get(contentHash)!;
+            
+            // Important: If it was previously marked deleted, it is now alive again (re-check)
+            existingMsg.isDeleted = false; 
+            
+            // Update the map (updates ID if the hash belonged to a diff ID, though unlikely)
+            historyMap.set(msgId, existingMsg);
             log(`Skipping unchanged message ${msgId}`);
-            messages.push(existingHashes.get(contentHash)!);
             continue;
         }
 
@@ -122,13 +134,46 @@ async function scrape() {
             savedFiles.push(filename);
         }
 
-        messages.push({ id: msgId, text, files: savedFiles, hash: contentHash, replyTo });
+        // Upsert into History Map
+        historyMap.set(msgId, { 
+            id: msgId, 
+            text, 
+            files: savedFiles, 
+            hash: contentHash, 
+            replyTo,
+            isDeleted: false // Definitely alive if we just saw it
+        });
     }
 
-    // Save Cache
-    log(`Saving ${messages.length} messages to cache...`);
-    await Bun.write(path.join(CACHE_DIR, 'data.json'), JSON.stringify(messages, null, 2));
-    log(`Success! Scraped ${messages.length} messages.`);
+    // 3. Logic: Detect Deletions
+    // If we have IDs [100, 101, 103] in this run, then 102 is deleted.
+    // We only check within the range of IDs we actually fetched to avoid marking older unloaded messages as deleted.
+    if (currentRunIds.length > 0) {
+        const minId = Math.min(...currentRunIds);
+        const maxId = Math.max(...currentRunIds);
+        const seenSet = new Set(currentRunIds.map(String));
+
+        for (const [id, msg] of historyMap) {
+            const idNum = parseInt(id);
+            // If the message is within the window of what we just looked at...
+            if (!isNaN(idNum) && idNum >= minId && idNum <= maxId) {
+                // ...but it was NOT seen in the HTML
+                if (!seenSet.has(id)) {
+                    if (!msg.isDeleted) {
+                        msg.isDeleted = true;
+                        log(`⚠️ Message ${id} detected as DELETED.`);
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Save Cache (Sort by ID for cleanliness)
+    const sortedMessages = Array.from(historyMap.values()).sort((a, b) => parseInt(a.id) - parseInt(b.id));
+    
+    log(`Saving ${sortedMessages.length} messages to cache...`);
+    await Bun.write(path.join(CACHE_DIR, 'data.json'), JSON.stringify(sortedMessages, null, 2));
+    log(`Success!`);
 }
 
 scrape();
