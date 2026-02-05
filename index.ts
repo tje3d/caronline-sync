@@ -211,6 +211,9 @@ async function run() {
     }
     isProcessing = true;
     try {
+        if (baleService) {
+            await baleService.testConnection();
+        }
         await scrape();
         
         if (baleService) {

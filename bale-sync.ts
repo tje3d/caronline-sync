@@ -52,6 +52,17 @@ class BaleClient {
     }
   }
 
+  async getMe(): Promise<BaleResponse> {
+    const url = `${BASE_URL}/getMe`;
+    try {
+      const response = await fetch(url);
+      return (await response.json()) as BaleResponse;
+    } catch (e) {
+      errorLog('Error getting bot info', e);
+      throw e;
+    }
+  }
+
   async sendFile(filePath: string, caption?: string, replyToMessageId?: number): Promise<BaleResponse> {
     const fileName = path.basename(filePath);
     const fileType = this.getFileType(filePath);
@@ -180,6 +191,23 @@ class BaleSyncService {
       process.exit(1);
     }
     this.client = new BaleClient(BALE_BOT_TOKEN, BALE_CHAT_ID);
+  }
+
+  async testConnection() {
+    log('🔍 Testing Bale Bot connection...');
+    try {
+      const res = await this.client.getMe();
+      if (res.ok && res.result) {
+        log(`✅ Bale Bot connected: @${res.result.username} (${res.result.first_name})`);
+        return true;
+      } else {
+        errorLog('Failed to connect to Bale Bot', res.description || 'Unknown error');
+        return false;
+      }
+    } catch (e) {
+      errorLog('Failed to connect to Bale Bot', e);
+      return false;
+    }
   }
 
   async start() {
