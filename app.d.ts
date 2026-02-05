@@ -9,4 +9,19 @@ declare global {
         replyTo: string | null;
         isDeleted: boolean;
     }
+
+    interface ProcessedMessage {
+        baleId: number;
+        hash: string;
+        isDeleted: boolean;
+        timestamp: number;
+    }
+
+    interface BaleResponse {
+        ok: boolean;
+        result?: any;
+        error?: string;
+        description?: string;
+        error_code?: number;
+    }
 }

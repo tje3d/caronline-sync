@@ -13,16 +13,21 @@ function log(message: string) {
 
 // --- Helper: Download File ---
 async function download(url: string, filepath: string) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+
     try {
-        const res = await fetch(url);
+        const res = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
         if (!res.ok) {
-             console.error(`[${new Date().toISOString()}] Failed to fetch ${url}: ${res.status} ${res.statusText}`);
-             return;
+             throw new Error(`Failed to fetch ${url}: ${res.status} ${res.statusText}`);
         }
         await Bun.write(filepath, res);
         log(`Downloaded ${path.basename(filepath)}`);
     } catch (e) {
-        console.error(`[${new Date().toISOString()}] Error downloading ${url}`, e);
+        clearTimeout(timeoutId);
+        throw e;
     }
 }
 
@@ -124,14 +129,19 @@ async function scrape() {
 
         // Download loop
         const savedFiles = [];
-        for (let i = 0; i < mediaToDownload.length; i++) {
-            const url = mediaToDownload[i]!;
-            const ext = url.split('.').pop()?.split('?')[0] || 'jpg';
-            const filename = `${msgId}_${i}.${ext}`;
-            
-            log(`Downloading media ${i + 1}/${mediaToDownload.length}: ${url}`);
-            await download(url, path.join(CACHE_DIR, filename));
-            savedFiles.push(filename);
+        try {
+            for (let i = 0; i < mediaToDownload.length; i++) {
+                const url = mediaToDownload[i]!;
+                const ext = url.split('.').pop()?.split('?')[0] || 'jpg';
+                const filename = `${msgId}_${i}.${ext}`;
+                
+                log(`Downloading media ${i + 1}/${mediaToDownload.length}: ${url}`);
+                await download(url, path.join(CACHE_DIR, filename));
+                savedFiles.push(filename);
+            }
+        } catch (e: any) {
+            log(`❌ Failed to download media for message ${msgId}, skipping save to retry later. Error: ${e.message}`);
+            continue;
         }
 
         // Upsert into History Map
@@ -176,4 +186,26 @@ async function scrape() {
     log(`Success!`);
 }
 
-scrape();
+
+let isProcessing = false;
+
+async function run() {
+    if (isProcessing) {
+        log('Previous scrape still running, skipping...');
+        return;
+    }
+    isProcessing = true;
+    try {
+        await scrape();
+    } catch (e) {
+        console.error(`[${new Date().toISOString()}] Error in scrape loop`, e);
+    } finally {
+        isProcessing = false;
+    }
+}
+
+// Run immediately on start
+run();
+
+// Then every 5 seconds
+setInterval(run, 5000);
