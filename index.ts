@@ -182,8 +182,11 @@ async function scrape() {
     // 4. Save Cache (Sort by ID for cleanliness)
     const sortedMessages = Array.from(historyMap.values()).sort((a, b) => parseInt(a.id) - parseInt(b.id));
     
-    log(`Saving ${sortedMessages.length} messages to cache...`);
-    await Bun.write(path.join(CACHE_DIR, 'data.json'), JSON.stringify(sortedMessages, null, 2));
+    // Keep only the last 100 messages
+    const messagesToSave = sortedMessages.slice(-100);
+
+    log(`Saving ${messagesToSave.length} messages to cache...`);
+    await Bun.write(path.join(CACHE_DIR, 'data.json'), JSON.stringify(messagesToSave, null, 2));
     log(`Success!`);
 }
 
