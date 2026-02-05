@@ -5,9 +5,9 @@ import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 
 // --- Configuration ---
-const CHANNEL_URL = 'https://t.me/s/caronline';
-const CACHE_DIR = path.join(__dirname, 'cache');
-const LIMIT = 10;
+const CHANNEL_URL = process.env.CHANNEL_URL || 'https://t.me/s/caronline';
+const CACHE_DIR = process.env.CACHE_DIR || path.join(__dirname, 'cache');
+const LIMIT = process.env.LIMIT ? parseInt(process.env.LIMIT) : 10;
 
 function log(message: string) {
     console.log(`[${new Date().toISOString()}] ${message}`);
