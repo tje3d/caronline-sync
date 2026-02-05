@@ -11,14 +11,6 @@ function log(message: string) {
     console.log(`[${new Date().toISOString()}] ${message}`);
 }
 
-interface Message {
-    id: string;
-    text: string;
-    files: string[];
-    hash?: string;
-    replyTo: string | null;
-}
-
 // --- Helper: Download File ---
 async function download(url: string, filepath: string) {
     try {
