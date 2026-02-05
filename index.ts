@@ -1,6 +1,7 @@
 import { parse } from 'node-html-parser';
 import * as fs from 'fs';
 import * as path from 'path';
+import { BaleSyncService } from './bale-sync';
 
 // --- Configuration ---
 const CHANNEL_URL = process.env.CHANNEL_URL || 'https://t.me/s/caronline';
@@ -88,7 +89,8 @@ async function scrape() {
         if (textNode) {
             text = textNode.innerHTML
                 .replace(/<br\s*\/?>/gi, '\n')
-                .replace(/<(?!\/?b\b)[^>]+>/gi, ''); 
+                .replace(/<\/?b>/gi, '*')
+                .replace(/<[^>]+>/gi, ''); 
         }
 
         const mediaToDownload: string[] = [];
@@ -121,7 +123,7 @@ async function scrape() {
             
             // Update the map (updates ID if the hash belonged to a diff ID, though unlikely)
             historyMap.set(msgId, existingMsg);
-            log(`Skipping unchanged message ${msgId}`);
+            // log(`Skipping unchanged message ${msgId}`);
             continue;
         }
 
@@ -160,13 +162,12 @@ async function scrape() {
     // We only check within the range of IDs we actually fetched to avoid marking older unloaded messages as deleted.
     if (currentRunIds.length > 0) {
         const minId = Math.min(...currentRunIds);
-        const maxId = Math.max(...currentRunIds);
         const seenSet = new Set(currentRunIds.map(String));
 
         for (const [id, msg] of historyMap) {
             const idNum = parseInt(id);
-            // If the message is within the window of what we just looked at...
-            if (!isNaN(idNum) && idNum >= minId && idNum <= maxId) {
+            // If the message is within the window of what we just looked at (or newer)...
+            if (!isNaN(idNum) && idNum >= minId) {
                 // ...but it was NOT seen in the HTML
                 if (!seenSet.has(id)) {
                     if (!msg.isDeleted) {
@@ -188,6 +189,17 @@ async function scrape() {
 
 
 let isProcessing = false;
+let baleService: BaleSyncService | null = null;
+
+try {
+    if (process.env.BALE_BOT_TOKEN && process.env.BALE_CHAT_ID) {
+        baleService = new BaleSyncService();
+    } else {
+        log('⚠️ Bale sync skipped: Missing BALE_BOT_TOKEN or BALE_CHAT_ID');
+    }
+} catch (e) {
+    console.error('Failed to initialize Bale Service', e);
+}
 
 async function run() {
     if (isProcessing) {
@@ -197,6 +209,12 @@ async function run() {
     isProcessing = true;
     try {
         await scrape();
+        
+        if (baleService) {
+            log('Starting Bale Sync...');
+            await baleService.syncOnce();
+            log('Bale Sync completed.');
+        }
     } catch (e) {
         console.error(`[${new Date().toISOString()}] Error in scrape loop`, e);
     } finally {

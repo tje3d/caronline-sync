@@ -117,6 +117,28 @@ class BaleClient {
     }
   }
 
+  async editMessageCaption(messageId: number, caption: string): Promise<BaleResponse> {
+    const url = `${BASE_URL}/editMessageCaption`;
+    const payload = {
+      chat_id: this.chatId,
+      message_id: messageId,
+      caption: caption,
+      parse_mode: 'HTML',
+    };
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      return (await response.json()) as BaleResponse;
+    } catch (e) {
+      errorLog(`Error editing message caption ${messageId}`, e);
+      throw e;
+    }
+  }
+
   async deleteMessage(messageId: number): Promise<BaleResponse> {
     const url = `${BASE_URL}/deleteMessage`;
     const payload = {
@@ -193,6 +215,15 @@ class BaleSyncService {
       await fs.writeFile(PROCESSED_FILE, JSON.stringify(processedObj, null, 2));
     } catch (error) {
       errorLog('Error saving processed posts', error);
+    }
+  }
+
+  public async syncOnce() {
+    await this.loadProcessedPosts();
+    try {
+      await this.sync();
+    } catch (error) {
+      errorLog('Error during sync cycle', error);
     }
   }
 
@@ -309,7 +340,11 @@ class BaleSyncService {
            log(`✏️ Message ${msg.id} was edited`);
            if (processed.baleId > 0) {
              if (msg.text) {
-               await this.client.editMessage(processed.baleId, msg.text);
+               if (msg.files && msg.files.length > 0) {
+                 await this.client.editMessageCaption(processed.baleId, msg.text);
+               } else {
+                 await this.client.editMessage(processed.baleId, msg.text);
+               }
              }
            }
            processed.hash = msg.hash || '';
@@ -333,9 +368,13 @@ class BaleSyncService {
   }
 }
 
-// Start the service
-const service = new BaleSyncService();
-service.start().catch(e => {
-  console.error('Fatal error:', e);
-  process.exit(1);
-});
+export { BaleSyncService };
+
+// Start the service only if run directly
+if (import.meta.main) {
+  const service = new BaleSyncService();
+  service.start().catch(e => {
+    console.error('Fatal error:', e);
+    process.exit(1);
+  });
+}
