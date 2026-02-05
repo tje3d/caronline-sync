@@ -9,6 +9,13 @@ const CHANNEL_URL = 'https://t.me/s/caronline';
 const CACHE_DIR = path.join(__dirname, 'cache');
 const LIMIT = 20;
 
+interface Message {
+    id: string;
+    text: string;
+    files: string[];
+    hash?: string;
+}
+
 // --- Helper: Download File ---
 async function download(url: string, filepath: string) {
     try {
@@ -25,6 +32,18 @@ async function download(url: string, filepath: string) {
 async function scrape() {
     if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR);
 
+    // Load existing data
+    let existingMessages: Message[] = [];
+    const dataPath = path.join(CACHE_DIR, 'data.json');
+    if (fs.existsSync(dataPath)) {
+        try {
+            existingMessages = JSON.parse(fs.readFileSync(dataPath, 'utf-8'));
+        } catch (e) {
+            console.error('Error reading existing data', e);
+        }
+    }
+    const existingHashes = new Map(existingMessages.filter(m => m.hash).map(m => [m.hash!, m]));
+
     console.log('Fetching channel...');
     const res = await fetch(CHANNEL_URL);
     const html = await res.text();
@@ -35,7 +54,7 @@ async function scrape() {
     // 2. Select Message Wrappers
     // node-html-parser uses standard querySelectorAll
     const nodes = root.querySelectorAll('.tgme_widget_message_wrap').slice(-LIMIT);
-    const messages = [];
+    const messages: Message[] = [];
 
     for (const node of nodes) {
         // IDs are usually in data-post="channel/123"
@@ -69,6 +88,16 @@ async function scrape() {
             if (src) mediaToDownload.push(src);
         });
 
+        // Generate Content Hash
+        // Use Bun's fast non-cryptographic hash (returns number, 64-bit)
+        const contentHash = Bun.hash(JSON.stringify({ text, media: mediaToDownload })).toString();
+
+        if (existingHashes.has(contentHash)) {
+            console.log(`Skipping unchanged message ${msgId}`);
+            messages.push(existingHashes.get(contentHash)!);
+            continue;
+        }
+
         // Download loop
         const savedFiles = [];
         for (let i = 0; i < mediaToDownload.length; i++) {
@@ -80,7 +109,7 @@ async function scrape() {
             savedFiles.push(filename);
         }
 
-        messages.push({ id: msgId, text, files: savedFiles });
+        messages.push({ id: msgId, text, files: savedFiles, hash: contentHash });
     }
 
     // Save Cache
