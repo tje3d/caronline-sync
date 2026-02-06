@@ -150,6 +150,49 @@ class BaleClient {
     }
   }
 
+  async sendMediaGroup(files: string[], caption?: string, replyToMessageId?: number): Promise<BaleResponse> {
+    const url = `${BASE_URL}/sendMediaGroup`;
+    const formData = new FormData();
+    formData.append('chat_id', this.chatId);
+    if (replyToMessageId) formData.append('reply_to_message_id', replyToMessageId.toString());
+
+    const media = [];
+     for (let i = 0; i < files.length; i++) {
+         const filePath = files[i]!;
+         const fileName = path.basename(filePath);
+         const fileType = this.getFileType(filePath);
+        const attachName = `file${i}`;
+        
+        try {
+            const fileBuffer = await fs.readFile(filePath);
+            formData.append(attachName, new Blob([fileBuffer]), fileName);
+            
+            media.push({
+                type: fileType,
+                media: `attach://${attachName}`,
+                caption: i === 0 ? caption : undefined, // Only first item gets caption
+                parse_mode: 'HTML'
+            });
+        } catch (e) {
+            errorLog(`Error reading file ${fileName}`, e);
+            throw e;
+        }
+    }
+    
+    formData.append('media', JSON.stringify(media));
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        body: formData,
+      });
+      return (await response.json()) as BaleResponse;
+    } catch (e) {
+      errorLog('Error sending media group', e);
+      throw e;
+    }
+  }
+
   async deleteMessage(messageId: number): Promise<BaleResponse> {
     const url = `${BASE_URL}/deleteMessage`;
     const payload = {
@@ -229,7 +272,23 @@ class BaleSyncService {
   private async loadProcessedPosts() {
     try {
       const data = await fs.readFile(PROCESSED_FILE, 'utf-8');
-      const processed = JSON.parse(data) as Record<string, ProcessedMessage>;
+      const raw = JSON.parse(data);
+      const processed: Record<string, ProcessedMessage> = {};
+      
+      for (const [key, val] of Object.entries(raw)) {
+          const v = val as any;
+          if (v.baleId !== undefined && v.baleIds === undefined) {
+              // Migration: Convert old format to new format
+              processed[key] = {
+                  ...v,
+                  baleIds: [v.baleId]
+              };
+              delete (processed[key] as any).baleId;
+          } else {
+              processed[key] = v;
+          }
+      }
+      
       this.processedPosts = new Map(Object.entries(processed));
       log(`📋 Loaded ${this.processedPosts.size} processed posts`);
     } catch (error) {
@@ -291,78 +350,86 @@ class BaleSyncService {
           let replyToBaleId: number | undefined;
           if (msg.replyTo) {
             const parentProcessed = this.processedPosts.get(msg.replyTo);
-            if (parentProcessed && !parentProcessed.isDeleted) {
-              replyToBaleId = parentProcessed.baleId;
+            if (parentProcessed && !parentProcessed.isDeleted && parentProcessed.baleIds.length > 0) {
+              replyToBaleId = parentProcessed.baleIds[0];
             }
           }
 
-          let baleMessageId: number | undefined;
+          let baleMessageIds: number[] = [];
 
           // Send Media
           if (msg.files && msg.files.length > 0) {
-            // Send each file
-            for (let i = 0; i < msg.files.length; i++) {
-              const file = msg.files[i]!;
-              const filePath = path.join(CACHE_DIR, file);
-              const textToSend: string | undefined = (i === 0) ? msg.text : undefined;
-              
-              try {
-                // Check if file exists before sending
+            if (msg.files.length === 1) {
+                // Single File
+                const file = msg.files[0]!;
+                const filePath = path.join(CACHE_DIR, file);
                 try {
-                  await fs.access(filePath);
-                } catch {
-                   log(`⚠️ Media file missing: ${file}, skipping`);
-                   continue;
+                    await fs.access(filePath);
+                    const res = await this.client.sendFile(filePath, msg.text, replyToBaleId);
+                    if (res.ok && res.result) {
+                        baleMessageIds.push(res.result.message_id);
+                    }
+                    await this.deleteFile(filePath);
+                } catch (e) {
+                    errorLog(`Failed to send file ${file}`, e);
+                    stats.errors++;
                 }
-
-                const res = await this.client.sendFile(filePath, textToSend, replyToBaleId);
-                if (res.ok && res.result) {
-                  // Track the first message ID as the main ID
-                  if (i === 0) baleMessageId = res.result.message_id;
+            } else {
+                // Multiple Files - Send as Media Group
+                const filePaths: string[] = [];
+                for (const file of msg.files) {
+                    const fp = path.join(CACHE_DIR, file);
+                    try {
+                        await fs.access(fp);
+                        filePaths.push(fp);
+                    } catch {
+                        log(`⚠️ Media file missing: ${file}, skipping`);
+                    }
                 }
                 
-                // DELETE FILE after successful send
-                await this.deleteFile(filePath);
-                
-              } catch (e) {
-                errorLog(`Failed to send file ${file}`, e);
-                stats.errors++;
-              }
+                if (filePaths.length > 0) {
+                    try {
+                        const res = await this.client.sendMediaGroup(filePaths, msg.text, replyToBaleId);
+                        if (res.ok && res.result && Array.isArray(res.result)) {
+                             // Assuming result is array of messages
+                             baleMessageIds = res.result.map((m: any) => m.message_id);
+                        }
+                        for (const fp of filePaths) await this.deleteFile(fp);
+                    } catch (e) {
+                         errorLog(`Failed to send media group`, e);
+                         stats.errors++;
+                    }
+                }
             }
           } else if (msg.text) {
             // Send Text Only
             const res = await this.client.sendMessage(msg.text, replyToBaleId);
             if (res.ok && res.result) {
-              baleMessageId = res.result.message_id;
+              baleMessageIds.push(res.result.message_id);
             } else {
                 stats.errors++;
             }
           }
 
-          if (baleMessageId) {
+          if (baleMessageIds.length > 0) {
             this.processedPosts.set(msg.id, {
-              baleId: baleMessageId,
+              baleIds: baleMessageIds,
               hash: msg.hash || '',
               isDeleted: false,
               timestamp: Date.now(),
             });
             changesMade = true;
-            log(`✅ Synced message ${msg.id} -> Bale ID ${baleMessageId}`);
+            log(`✅ Synced message ${msg.id} -> Bale IDs ${baleMessageIds.join(', ')}`);
             stats.synced++;
           } else {
-             // If we didn't get a baleMessageId and didn't log an error (e.g. empty message?), count as error or skipped?
-             // If errors were already counted above, we don't want to double count or miss count.
-             // If errors > 0, we already counted.
-             // If it was just empty, maybe skipped.
              if (stats.errors === 0 && !msg.isDeleted) {
-                 // Maybe it was skipped due to missing files but not counted as error?
-                 // Let's just leave it.
+                 // Skipped
              }
           }
         } else {
           // New but already deleted, just mark processed
           this.processedPosts.set(msg.id, {
-            baleId: -1, // No real ID
+            baleIds: [],
             hash: msg.hash || '',
             isDeleted: true,
             timestamp: Date.now(),
@@ -377,8 +444,8 @@ class BaleSyncService {
         // Check for Deletion
         if (msg.isDeleted && !processed.isDeleted) {
           log(`🗑️ Message ${msg.id} was deleted`);
-          if (processed.baleId > 0) {
-            await this.client.deleteMessage(processed.baleId);
+          for (const bid of processed.baleIds) {
+            await this.client.deleteMessage(bid);
           }
           processed.isDeleted = true;
           processed.hash = msg.hash || '';
@@ -388,12 +455,13 @@ class BaleSyncService {
         // Check for Edits (Text only usually)
         else if (!msg.isDeleted && !processed.isDeleted && msg.hash !== processed.hash) {
            log(`✏️ Message ${msg.id} was edited`);
-           if (processed.baleId > 0) {
+           if (processed.baleIds.length > 0) {
+             const firstId = processed.baleIds[0]!;
              if (msg.text) {
                if (msg.files && msg.files.length > 0) {
-                 await this.client.editMessageCaption(processed.baleId, msg.text);
+                 await this.client.editMessageCaption(firstId, msg.text);
                } else {
-                 await this.client.editMessage(processed.baleId, msg.text);
+                 await this.client.editMessage(firstId, msg.text);
                }
              }
            }

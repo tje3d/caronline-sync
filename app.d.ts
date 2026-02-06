@@ -11,7 +11,7 @@ declare global {
     }
 
     interface ProcessedMessage {
-        baleId: number;
+        baleIds: number[];
         hash: string;
         isDeleted: boolean;
         timestamp: number;
