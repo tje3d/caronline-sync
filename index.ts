@@ -90,6 +90,7 @@ async function scrape() {
             text = textNode.innerHTML
                 .replace(/<br\s*\/?>/gi, '\n')
                 .replace(/<\/?b>/gi, '*')
+                .replace(/&#33;/g, '!')
                 .replace(/<[^>]+>/gi, ''); 
         }
 
