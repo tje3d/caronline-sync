@@ -111,8 +111,11 @@ async function scrape() {
             if (src) mediaToDownload.push(src);
         });
 
+        // Deduplicate media
+        const uniqueMedia = [...new Set(mediaToDownload)];
+
         // Generate Content Hash
-        const contentHash = Bun.hash(JSON.stringify({ text, media: mediaToDownload, replyTo })).toString();
+        const contentHash = Bun.hash(JSON.stringify({ text, media: uniqueMedia, replyTo })).toString();
 
         // 2. Logic: Unchanged vs New
         if (existingHashes.has(contentHash)) {
@@ -128,17 +131,17 @@ async function scrape() {
             continue;
         }
 
-        log(`Processing new/changed message ${msgId} with ${mediaToDownload.length} media files (ReplyTo: ${replyTo || 'None'}).`);
+        log(`Processing new/changed message ${msgId} with ${uniqueMedia.length} media files (ReplyTo: ${replyTo || 'None'}).`);
 
         // Download loop
         const savedFiles = [];
         try {
-            for (let i = 0; i < mediaToDownload.length; i++) {
-                const url = mediaToDownload[i]!;
+            for (let i = 0; i < uniqueMedia.length; i++) {
+                const url = uniqueMedia[i]!;
                 const ext = url.split('.').pop()?.split('?')[0] || 'jpg';
                 const filename = `${msgId}_${i}.${ext}`;
                 
-                log(`Downloading media ${i + 1}/${mediaToDownload.length}: ${url}`);
+                log(`Downloading media ${i + 1}/${uniqueMedia.length}: ${url}`);
                 await download(url, path.join(CACHE_DIR, filename));
                 savedFiles.push(filename);
             }
