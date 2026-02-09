@@ -15,16 +15,21 @@ function log(message: string) {
 // --- Helper: Download File ---
 async function download(url: string, filepath: string) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
 
     try {
         const res = await fetch(url, { signal: controller.signal });
-        clearTimeout(timeoutId);
 
         if (!res.ok) {
+            clearTimeout(timeoutId);
              throw new Error(`Failed to fetch ${url}: ${res.status} ${res.statusText}`);
         }
-        await Bun.write(filepath, res);
+        
+        // Buffer first to ensure complete download before writing
+        const buffer = await res.arrayBuffer();
+        await Bun.write(filepath, buffer);
+        
+        clearTimeout(timeoutId);
         log(`Downloaded ${path.basename(filepath)}`);
     } catch (e) {
         clearTimeout(timeoutId);
